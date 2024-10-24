@@ -1,107 +1,128 @@
 import os
-import json
-import base64
-import hashlib
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-from cryptography.exceptions import InvalidTag
+import shutil
+import zipfile
+from tkinter import Tk, Button, Label, filedialog, messagebox
+from cryptography.fernet import Fernet
+# import pyautogui
 
-# Step 1: Key Derivation Function
-def derive_key(password: str, salt: bytes) -> bytes:
-    """
-    Derive a cryptographic key from a password using PBKDF2 with SHA-256.
-    """
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100000,
-        backend=default_backend()
-    )
-    return kdf.derive(password.encode())
+# Generate and save a new encryption key
+def generate_key():
+    key = Fernet.generate_key()
+    save_path = filedialog.asksaveasfilename(title="Save Encryption Key", defaultextension=".key", filetypes=[("Key Files", "*.key")])
+    if save_path:
+        with open(save_path, 'wb') as key_file:
+            key_file.write(key)
+        messagebox.showinfo("Key Saved", f"Encryption key saved to: {save_path}")
+    else:
+        messagebox.showwarning("Save Cancelled", "Encryption key generation cancelled.")
 
-# Step 2: AES-GCM Encryption
-def encrypt_data(data: bytes, key: bytes) -> (bytes, bytes, bytes):
-    """
-    Encrypt data using AES-GCM for confidentiality and integrity.
-    """
-    iv = os.urandom(12)  # 96-bit nonce for AES-GCM
-    cipher = Cipher(
-        algorithms.AES(key),
-        modes.GCM(iv),
-        backend=default_backend()
-    )
-    encryptor = cipher.encryptor()
-    ciphertext = encryptor.update(data) + encryptor.finalize()
-    return iv, ciphertext, encryptor.tag
+# Load encryption key
+def load_key():
+    key_path = filedialog.askopenfilename(title="Select Encryption Key", filetypes=[("Key Files", "*.key")])
+    if key_path:
+        with open(key_path, 'rb') as key_file:
+            return Fernet(key_file.read())
+    else:
+        messagebox.showwarning("No Key Selected", "No encryption key selected.")
+        return None
 
-# Step 3: AES-GCM Decryption
-def decrypt_data(ciphertext: bytes, key: bytes, iv: bytes, tag: bytes) -> bytes:
-    """
-    Decrypt data using AES-GCM.
-    """
-    cipher = Cipher(
-        algorithms.AES(key),
-        modes.GCM(iv, tag),
-        backend=default_backend()
-    )
-    decryptor = cipher.decryptor()
-    try:
-        return decryptor.update(ciphertext) + decryptor.finalize()
-    except InvalidTag:
-        raise ValueError("Decryption failed: data has been tampered with or key is incorrect.")
+# Encrypt a file
+def encrypt_file(file_path, cipher):
+    with open(file_path, "rb") as file:
+        encrypted_data = cipher.encrypt(file.read())
+    encrypted_path = f"{file_path}.enc"
+    with open(encrypted_path, "wb") as enc_file:
+        enc_file.write(encrypted_data)
+    return encrypted_path
 
-# Step 4: Archiving System
-def archive_data(data: str, password: str, archive_name: str) -> None:
-    """
-    Archive critical data by encrypting and storing in a secure location.
-    """
-    salt = os.urandom(16)  # Generate a new salt for each password-based key derivation
-    key = derive_key(password, salt)
-    iv, encrypted_data, tag = encrypt_data(data.encode(), key)
+# Decrypt a file
+def decrypt_file(file_path, cipher):
+    with open(file_path, "rb") as file:
+        decrypted_data = cipher.decrypt(file.read())
+    decrypted_path = file_path.replace(".enc", "")
+    with open(decrypted_path, "wb") as dec_file:
+        dec_file.write(decrypted_data)
+    return decrypted_path
 
-    # Prepare data for storage
-    archive_content = {
-        "salt": base64.b64encode(salt).decode(),
-        "iv": base64.b64encode(iv).decode(),
-        "ciphertext": base64.b64encode(encrypted_data).decode(),
-        "tag": base64.b64encode(tag).decode(),
-    }
+# Archive and encrypt folder contents while maintaining structure
+def archive_and_encrypt():
+    folder_path = filedialog.askdirectory(title="Select a Folder to Archive")
+    if not folder_path:
+        return
 
-    # Write to file
-    with open(f"{archive_name}.json", "w") as archive_file:
-        json.dump(archive_content, archive_file)
+    cipher = load_key()
+    if not cipher:
+        return
 
-    print(f"Data archived securely in {archive_name}.json.")
+    archive_name = f"{os.path.basename(folder_path)}.zip"
+    temp_dir = f"{folder_path}_temp"
+    os.makedirs(temp_dir, exist_ok=True)
 
-# Step 5: Restore Data
-def restore_data(archive_name: str, password: str) -> str:
-    """
-    Restore data from archive by decrypting.
-    """
-    with open(f"{archive_name}.json", "r") as archive_file:
-        archive_content = json.load(archive_file)
+    # Encrypt files and maintain relative structure
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            file_path = os.path.join(root, file)
+            relative_path = os.path.relpath(file_path, folder_path)
+            encrypted_file = encrypt_file(file_path, cipher)
+            encrypted_relative_path = f"{relative_path}.enc"
+            dest_path = os.path.join(temp_dir, encrypted_relative_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            shutil.move(encrypted_file, dest_path)
 
-    # Decode base64
-    salt = base64.b64decode(archive_content["salt"])
-    iv = base64.b64decode(archive_content["iv"])
-    ciphertext = base64.b64decode(archive_content["ciphertext"])
-    tag = base64.b64decode(archive_content["tag"])
+    # Create an archive
+    with zipfile.ZipFile(archive_name, 'w') as zipf:
+        for root, _, files in os.walk(temp_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                relative_path = os.path.relpath(file_path, temp_dir)
+                zipf.write(file_path, relative_path)
 
-    # Derive key and decrypt
-    key = derive_key(password, salt)
-    decrypted_data = decrypt_data(ciphertext, key, iv, tag)
+    # Clean up temporary files
+    shutil.rmtree(temp_dir)
+    messagebox.showinfo("Success", f"Folder archived and encrypted as: {archive_name}")
 
-    return decrypted_data.decode()
+def unzip_and_decrypt():
+    archive_path = filedialog.askopenfilename(title="Select an Archive", filetypes=[("Zip Files", "*.zip")])
+    if not archive_path:
+        return
 
-# Example usage
+    cipher = load_key()
+    if not cipher:
+        return
+
+    extract_dir = filedialog.askdirectory(title="Select Extraction Directory")
+    if not extract_dir:
+        return
+
+    # Unzip archive directly into the destination directory
+    with zipfile.ZipFile(archive_path, 'r') as zipf:
+        zipf.extractall(extract_dir)
+
+    # Walk through the extracted files and decrypt them
+    for root, _, files in os.walk(extract_dir):
+        for file in files:
+            if file.endswith(".enc"):
+                encrypted_file_path = os.path.join(root, file)
+                decrypted_file_path = encrypted_file_path.replace(".enc", "")
+                decrypt_file(encrypted_file_path, cipher)  # Decrypt and write to the correct location
+                os.remove(encrypted_file_path)  # Remove encrypted file after decryption
+
+    messagebox.showinfo("Success", f"Archive unzipped and decrypted in: {extract_dir}")
+
+
+# Create the Tkinter interface
+def create_interface():
+    root = Tk()
+    root.title("Encryption and Archiving Tool")
+
+    Label(root, text="Choose an Action:").grid(row=0, column=0, columnspan=2, pady=10)
+
+    Button(root, text="Generate Encryption Key", command=generate_key, width=30).grid(row=1, column=0, columnspan=2, pady=5)
+    Button(root, text="Archive and Encrypt Folder", command=archive_and_encrypt, width=30).grid(row=2, column=0, columnspan=2, pady=5)
+    Button(root, text="Unzip and Decrypt Archive", command=unzip_and_decrypt, width=30).grid(row=3, column=0, columnspan=2, pady=5)
+
+    root.mainloop()
+
+# Run the program
 if __name__ == "__main__":
-    user_data = "Sensitive information that needs encryption."
-    user_password = "strong_password123"
-
-    archive_data(user_data, user_password, "user_archive")
-    restored_data = restore_data("user_archive", user_password)
-    print(f"Restored data: {restored_data}")
+    create_interface()
